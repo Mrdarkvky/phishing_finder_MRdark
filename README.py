@@ -13,19 +13,16 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
 
-# Suppress SSL warnings
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Set API Keys securely from environment variables
 VIRUSTOTAL_API_KEY = "e9da9b6b545cc648c7eff3b235e5bd9bfd376945b0976abbf304e31a463d86f2"
 GOOGLE_SAFE_BROWSING_API_KEY = "AIzaSyCQfoO4aPQ21cFguQQSor9SHj02VQ1chNk"
 URLSCAN_API_KEY = "0e37e828-a9d9-45c0-ac50-1ca579b86c72"
 ABUSEIPDB_API_KEY = "bdf04af9c78458b75b73ef2a3c45226eceff5585ddd968557a7c31d7b6a5907380422f9392d77e27"
 
-# Define headers to mimic a real browser
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/110.0.0.0 Safari/537.36"
 }
@@ -43,7 +40,7 @@ def is_site_reachable_selenium(url):
     
     try:
         driver.get(url)
-        time.sleep(5)  # Allow time for page load
+        time.sleep(5) 
         logging.info("Selenium successfully accessed the website.")
         return True
     except Exception as e:
