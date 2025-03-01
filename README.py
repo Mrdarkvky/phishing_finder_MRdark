@@ -1,178 +1,110 @@
-import pygame
-import subprocess
-import re
-import urllib.parse
-import ipaddress
-import pyttsx3
-import locale
-import requests
-import random
-import threading
-import time
-import pyperclip
-from bs4 import BeautifulSoup
 import socket
-import tldextract
-import joblib
-import numpy as np
+import ssl
+import requests
+import time
+import logging
 import os
+import base64
+from datetime import datetime
+from urllib.parse import urlparse
 
-model_path = r"C:\Users\nivas\3D Objects\HackThreat\phishing_model.pkl"
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-if not os.path.exists(model_path):
-    print("Error: AI Model file not found!")
-    model = None
-else:
+VIRUSTOTAL_API_KEY = "e9da9b6b545cc648c7eff3b235e5bd9bfd376945b0976abbf304e31a463d86f2"
+GOOGLE_SAFE_BROWSING_API_KEY = "AIzaSyCQfoO4aPQ21cFguQQSor9SHj02VQ1chNk"
+
+def is_site_reachable(hostname):
     try:
-        model = joblib.load(model_path)
-        print("AI Model Loaded Successfully!")
-    except Exception as e:
-        print(f"Error loading AI model: {e}")
-        model = None
+        ip_address = socket.gethostbyname(hostname)
+        if not ip_address:
+            return False
+        for scheme in ["http", "https"]:
+            try:
+                response = requests.head(f"{scheme}://{hostname}", timeout=5, allow_redirects=True)
+                if response.status_code < 400:
+                    return True
+            except requests.RequestException:
+                continue
+    except (socket.gaierror, socket.herror):
+        return False
+    return False
 
-pygame.init()
-pygame.font.init()
+def check_virustotal(url):
+    if not VIRUSTOTAL_API_KEY:
+        return {"Error": "VirusTotal API key not configured."}
 
-WIDTH, HEIGHT = 1000, 700
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("DARK - Phishing Detection AI")
-
-BLACK = (0, 0, 0)
-DARK_BLUE = (0, 20, 40)
-BLUE = (0, 150, 255)
-RED = (255, 50, 50)
-GREEN = (50, 255, 100)
-WHITE = (255, 255, 255)
-GRAY = (100, 100, 100)
-YELLOW = (255, 255, 0)
-
-title_font = pygame.font.SysFont("Arial", 48, bold=True)
-header_font = pygame.font.SysFont("Arial", 36)
-text_font = pygame.font.SysFont("Arial", 20)
-result_font = pygame.font.SysFont("Arial", 24, bold=True)
-
-speech_active = False
-url_history = []
-current_history_index = -1
-undo_history = []
-undo_position = -1
-max_undo_steps = 20
-engine = None
-
-def init_tts():
-    global engine
+    headers = {"x-apikey": VIRUSTOTAL_API_KEY}
+    encoded_url = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
+    url_check = f"https://www.virustotal.com/api/v3/urls/{encoded_url}"
+    
     try:
-        engine = pyttsx3.init()
-        voices = engine.getProperty('voices')
-        for voice in voices:
-            if 'english' in voice.name.lower():
-                engine.setProperty('voice', voice.id)
-                break
-    except Exception as e:
-        print(f"TTS initialization error: {e}")
+        response = requests.get(url_check, headers=headers)
+        response.raise_for_status()
+        response_json = response.json()
 
-tts_thread = threading.Thread(target=init_tts)
-tts_thread.daemon = True
-tts_thread.start()
+        if "data" in response_json and "attributes" in response_json["data"]:
+            attributes = response_json["data"]["attributes"]
+            if "stats" in attributes:
+                stats = attributes["stats"]
+                is_safe = "Safe" if stats.get("malicious", 0) == 0 and stats.get("suspicious", 0) == 0 else "Unsafe"
+                return {
+                    "Malicious": stats.get("malicious", 0),
+                    "Suspicious": stats.get("suspicious", 0),
+                    "Harmless": stats.get("harmless", 0),
+                    "Undetected": stats.get("undetected", 0),
+                    "Overall Status": is_safe
+                }
+            else:
+                return {"Error": "No 'stats' field in response. The URL may not have been scanned yet."}
+        else:
+            return {"Error": "Invalid response from VirusTotal. No 'data' or 'attributes' found."}
 
-core_radius = 100
-core_x, core_y = WIDTH // 2, HEIGHT // 3
-core_particles = []
-core_pulse = 0
-core_pulse_direction = 1
-particle_radius = 3
-particle_count = 120
-particle_min_speed = 0.5
-particle_max_speed = 2.0
-scanning = False
-scan_progress = 0
-scan_result = None
-scan_details = []
-url_input = ""
-input_active = True
-cursor_visible = True
-cursor_position = 0
-cursor_time = 0
-url_status = ""
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error checking VirusTotal: {e}")
+        return {"Error": str(e)}
 
-for i in range(particle_count):
-    angle = random.uniform(0, 360)
-    distance = random.uniform(core_radius * 0.8, core_radius * 1.2)
-    speed = random.uniform(particle_min_speed, particle_max_speed)
-    x = core_x + distance * pygame.math.Vector2(1, 0).rotate(angle).x
-    y = core_y + distance * pygame.math.Vector2(1, 0).rotate(angle).y
-    core_particles.append([x, y, angle, speed])
+    return {"Error": "No data available for the URL."}
 
-input_box = pygame.Rect(WIDTH // 4, HEIGHT // 2, WIDTH // 2, 50)
+def check_google_safe_browsing(url):
+    if not GOOGLE_SAFE_BROWSING_API_KEY:
+        return {"Error": "Google Safe Browsing API key not configured."}
+    url_gsb = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GOOGLE_SAFE_BROWSING_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "client": {"clientId": "your-client-id", "clientVersion": "1.0"},
+        "threatInfo": {
+            "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "THREAT_TYPE_UNSPECIFIED", "POTENTIALLY_HARMFUL_APPLICATION"],
+            "platformTypes": ["ANY_PLATFORM"],
+            "threatEntryTypes": ["URL"],
+            "threatEntries": [{"url": url}]
+        }
+    }
+    try:
+        response = requests.post(url_gsb, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        if "matches" in result:
+            return {"Safe Browsing Status": "Unsafe"}
+        return {}
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error checking Google Safe Browsing: {e}")
+        return {"Error": str(e)}
 
-def speak_text(text):
-    if engine is None:
+def check_website_and_url(domain_or_url):
+    parsed_url = urlparse(domain_or_url)
+    hostname = parsed_url.netloc if parsed_url.netloc else domain_or_url
+    print(f"\nVerifying if the site {hostname} exists...")
+    if not is_site_reachable(hostname):
+        print("Error: The website does not exist or is unreachable.")
         return
-    global speech_active
-    def speak_worker():
-        try:
-            global speech_active
-            if speech_active:
-                return
-            speech_active = True
-            engine.say(text)
-            engine.runAndWait()
-            speech_active = False
-        except Exception as e:
-            print(f"Error with TTS: {e}")
-            speech_active = False
-    if not speech_active:
-        speech_thread = threading.Thread(target=speak_worker)
-        speech_thread.daemon = True
-        speech_thread.start()
+    print("\nChecking for Malware with VirusTotal...")
+    malware_info = check_virustotal(domain_or_url)
+    for key, value in malware_info.items():
+        print(f"{key}: {value}")
 
-def is_valid_url(url):
-    try:
-        result = urllib.parse.urlparse(url)
-        if not all([result.scheme, result.netloc]):
-            return False
-        ext = tldextract.extract(url)
-        if not ext.suffix:
-            return False
-        return True
-    except Exception:
-        return False
+def main():
+    domain_or_url = input("Enter the domain or URL to verify its existence and check security status: ")
+    check_website_and_url(domain_or_url)
 
-def is_temporary_domain(url):
-    try:
-        parsed_url = urllib.parse.urlparse(url)
-        temp_domains = ["temp.com", "temporary.com", "tempurl.com", "10minutemail.com", "guerrillamail.com", "sharklasers.com", "disposable.com", "mailinator.com", "yopmail.com", "tempmail.net"]
-        domain = parsed_url.netloc.lower()
-        for temp in temp_domains:
-            if domain.endswith(temp) or domain == temp:
-                return True
-        return False
-    except:
-        return False
-
-def check_url(url):
-    results = []
-    is_suspicious = False
-    try:
-        parsed_url = urllib.parse.urlparse(url)
-        try:
-            ipaddress.ip_address(parsed_url.netloc)
-            results.append("WARNING: URL uses an IP address instead of a domain.")
-            is_suspicious = True
-        except ValueError:
-            pass
-        if len(url) > 75:
-            results.append("WARNING: URL is very long.")
-            is_suspicious = True
-        suspicious_words = ["login", "signin", "bank", "account", "verify", "secure", "update"]
-        found_words = [word for word in suspicious_words if word in url.lower()]
-        if found_words:
-            results.append(f"WARNING: URL contains suspicious words: {', '.join(found_words)}")
-            is_suspicious = True
-        if parsed_url.scheme != "https":
-            results.append("WARNING: URL does not use HTTPS.")
-            is_suspicious = True
-    except Exception as e:
-        results.append(f"Error parsing URL: {str(e)}")
-        is_suspicious = True
-    return is_suspicious, results
+if __name__ == "__main__":
+    main()
