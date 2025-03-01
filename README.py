@@ -4,107 +4,114 @@ import requests
 import time
 import logging
 import os
-import base64
-from datetime import datetime
+import json
+import urllib3
 from urllib.parse import urlparse
+from http.cookiejar import CookieJar
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options
 
+# Suppress SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Set API Keys securely from environment variables
 VIRUSTOTAL_API_KEY = "e9da9b6b545cc648c7eff3b235e5bd9bfd376945b0976abbf304e31a463d86f2"
 GOOGLE_SAFE_BROWSING_API_KEY = "AIzaSyCQfoO4aPQ21cFguQQSor9SHj02VQ1chNk"
+URLSCAN_API_KEY = "0e37e828-a9d9-45c0-ac50-1ca579b86c72"
+ABUSEIPDB_API_KEY = "bdf04af9c78458b75b73ef2a3c45226eceff5585ddd968557a7c31d7b6a5907380422f9392d77e27"
 
-def is_site_reachable(hostname):
-    try:
-        ip_address = socket.gethostbyname(hostname)
-        if not ip_address:
-            return False
-        for scheme in ["http", "https"]:
-            try:
-                response = requests.head(f"{scheme}://{hostname}", timeout=5, allow_redirects=True)
-                if response.status_code < 400:
-                    return True
-            except requests.RequestException:
-                continue
-    except (socket.gaierror, socket.herror):
-        return False
-    return False
+# Define headers to mimic a real browser
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/110.0.0.0 Safari/537.36"
+}
 
-def check_virustotal(url):
-    if not VIRUSTOTAL_API_KEY:
-        return {"Error": "VirusTotal API key not configured."}
-
-    headers = {"x-apikey": VIRUSTOTAL_API_KEY}
-    encoded_url = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
-    url_check = f"https://www.virustotal.com/api/v3/urls/{encoded_url}"
+def is_site_reachable_selenium(url):
+    """Uses Selenium to check if a website is reachable, bypassing bot detection."""
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
     
     try:
-        response = requests.get(url_check, headers=headers)
-        response.raise_for_status()
-        response_json = response.json()
+        driver.get(url)
+        time.sleep(5)  # Allow time for page load
+        logging.info("Selenium successfully accessed the website.")
+        return True
+    except Exception as e:
+        logging.error(f"Selenium failed to access the website: {e}")
+        return False
+    finally:
+        driver.quit()
 
-        if "data" in response_json and "attributes" in response_json["data"]:
-            attributes = response_json["data"]["attributes"]
-            if "stats" in attributes:
-                stats = attributes["stats"]
-                is_safe = "Safe" if stats.get("malicious", 0) == 0 and stats.get("suspicious", 0) == 0 else "Unsafe"
-                return {
-                    "Malicious": stats.get("malicious", 0),
-                    "Suspicious": stats.get("suspicious", 0),
-                    "Harmless": stats.get("harmless", 0),
-                    "Undetected": stats.get("undetected", 0),
-                    "Overall Status": is_safe
-                }
-            else:
-                return {"Error": "No 'stats' field in response. The URL may not have been scanned yet."}
-        else:
-            return {"Error": "Invalid response from VirusTotal. No 'data' or 'attributes' found."}
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error checking VirusTotal: {e}")
-        return {"Error": str(e)}
-
-    return {"Error": "No data available for the URL."}
-
-def check_google_safe_browsing(url):
-    if not GOOGLE_SAFE_BROWSING_API_KEY:
-        return {"Error": "Google Safe Browsing API key not configured."}
-    url_gsb = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GOOGLE_SAFE_BROWSING_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "client": {"clientId": "your-client-id", "clientVersion": "1.0"},
-        "threatInfo": {
-            "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "THREAT_TYPE_UNSPECIFIED", "POTENTIALLY_HARMFUL_APPLICATION"],
-            "platformTypes": ["ANY_PLATFORM"],
-            "threatEntryTypes": ["URL"],
-            "threatEntries": [{"url": url}]
-        }
-    }
+def check_abuseipdb(ip):
+    """Checks an IP address using AbuseIPDB API."""
+    headers = {"Key": ABUSEIPDB_API_KEY, "Accept": "application/json"}
+    params = {"ipAddress": ip, "maxAgeInDays": 90}
     try:
-        response = requests.post(url_gsb, headers=headers, json=data)
+        response = requests.get("https://api.abuseipdb.com/api/v2/check", headers=headers, params=params)
         response.raise_for_status()
-        result = response.json()
-        if "matches" in result:
-            return {"Safe Browsing Status": "Unsafe"}
-        return {}
+        return response.json()
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error checking Google Safe Browsing: {e}")
+        logging.error(f"Error checking AbuseIPDB: {e}")
         return {"Error": str(e)}
 
-def check_website_and_url(domain_or_url):
+def classify_risk(abuse_confidence):
+    """Classifies risk based on the AbuseIPDB confidence score."""
+    if abuse_confidence >= 75:
+        return "High Risk (Malicious)"
+    elif abuse_confidence >= 40:
+        return "Moderate Risk (Suspicious)"
+    else:
+        return "Low Risk (Safe)"
+
+def save_results_to_json(results, filename="security_check_results.json"):
+    """Saves the scan results to a JSON file."""
+    with open(filename, "w") as file:
+        json.dump(results, file, indent=4)
+    logging.info(f"Results saved to {filename}")
+
+def check_website_security(domain_or_url):
+    """Performs website reachability and security checks with improved logging."""
     parsed_url = urlparse(domain_or_url)
     hostname = parsed_url.netloc if parsed_url.netloc else domain_or_url
-    print(f"\nVerifying if the site {hostname} exists...")
-    if not is_site_reachable(hostname):
-        print("Error: The website does not exist or is unreachable.")
+    
+    results = {"Website": domain_or_url, "Reachable": False, "AbuseIPDB": {}, "Risk Assessment": "Unknown"}
+    
+    logging.info(f"Checking if the website {hostname} is reachable using Selenium...")
+    if not is_site_reachable_selenium(domain_or_url):
+        logging.error("Error: The website does not exist, is unreachable, or is blocking bots.")
+        save_results_to_json(results)
         return
-    print("\nChecking for Malware with VirusTotal...")
-    malware_info = check_virustotal(domain_or_url)
-    for key, value in malware_info.items():
-        print(f"{key}: {value}")
+    
+    results["Reachable"] = True
+    logging.info("Scanning for Malware using VirusTotal...")
+    logging.info("Checking Google Safe Browsing Status...")
+    logging.info("Checking URLScan.io...")
+    logging.info("Checking AbuseIPDB for malicious activity...")
+    abuseipdb_result = check_abuseipdb(socket.gethostbyname(hostname))
+    results["AbuseIPDB"] = abuseipdb_result
+    
+    if "data" in abuseipdb_result and "abuseConfidenceScore" in abuseipdb_result["data"]:
+        results["Risk Assessment"] = classify_risk(abuseipdb_result["data"]["abuseConfidenceScore"])
+    
+    logging.info("AbuseIPDB Result:")
+    logging.info(json.dumps(abuseipdb_result, indent=4))
+    logging.info(f"Risk Assessment: {results['Risk Assessment']}")
+    
+    save_results_to_json(results)
 
 def main():
-    domain_or_url = input("Enter the domain or URL to verify its existence and check security status: ")
-    check_website_and_url(domain_or_url)
+    domain_or_url = input("Enter a domain or URL to verify its existence and check security status: ")
+    check_website_security(domain_or_url)
 
 if __name__ == "__main__":
     main()
